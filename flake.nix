@@ -94,7 +94,9 @@
       };
 
       # ── Checks, formatter, dev shell ─────────────────────────────────────────
-      # Both Linux architectures: Lani is deployed on aarch64 as often as x86_64.
+      # Both Linux architectures: Lani is deployed on aarch64 as often as x86_64. The VM
+      # tests among these need KVM, so CI can only run those on x86_64 — GitHub's hosted
+      # aarch64 runners have no /dev/kvm.
       checks = forAllSystems (
         pkgs:
         {

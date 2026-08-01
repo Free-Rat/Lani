@@ -15,11 +15,22 @@ permissions:
 
 jobs:
   # Cheap and fast: formatting, the catalog consistency check, and proof that every
-  # configuration still evaluates. This is what catches most breakage, and it runs in
-  # a couple of minutes.
+  # configuration still evaluates. This is what catches most breakage.
+  #
+  # Runs on both architectures. The aarch64 half is not decoration — the Raspberry Pi is a
+  # first-class target, so the CLI and the nspawn image get built and evaluated natively
+  # rather than only cross-checked.
   check:
-    name: Evaluate and lint
-    runs-on: ubuntu-latest
+    name: Evaluate and lint (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
     steps:
       - uses: actions/checkout@v4
 
@@ -27,13 +38,16 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Formatting
-        run: nix build .#checks.x86_64-linux.formatting --print-build-logs
+        run: nix build .#checks.${{ matrix.system }}.formatting --print-build-logs
 
       - name: Catalog consistency
-        run: nix build .#checks.x86_64-linux.catalog-consistency --print-build-logs
+        run: nix build .#checks.${{ matrix.system }}.catalog-consistency --print-build-logs
+
+      - name: The health gate fails when it should
+        run: nix build .#checks.${{ matrix.system }}.health-check --print-build-logs
 
       - name: The CLI builds
-        run: nix build .#lani-cli --print-build-logs
+        run: nix build .#packages.${{ matrix.system }}.lani-cli --print-build-logs
 
       - name: Every configuration evaluates
         run: |
@@ -44,8 +58,8 @@ jobs:
         run: nix flake check ./catalog --print-build-logs
 
       - name: A clean checkout still builds a host from the template
-        # The whole point of the template. Uses the local checkout rather than the
-        # published flake so a pull request tests itself.
+        # Uses the local checkout rather than the published flake, so a pull request tests
+        # itself.
         run: |
           tmp="$(mktemp -d)"
           cp -r templates/host/. "$tmp/"
@@ -64,35 +78,29 @@ jobs:
           nix eval --override-input lani "$GITHUB_WORKSPACE" \
             .#nixosConfigurations.myhost.config.system.build.toplevel.drvPath
 
-  # The VM tests boot real machines and are slow. Kept separate so a formatting mistake
-  # does not cost half an hour before anyone finds out.
+  # The VM tests boot real machines, so they need KVM and they are slow. Kept separate so a
+  # formatting mistake does not cost half an hour before anyone finds out.
   #
-  # Run on both architectures: Lani is deployed on aarch64 as often as x86_64, and a test
-  # that only ever runs on one of them is how you find out the hard way that something was
-  # architecture-specific.
+  # x86_64 only, because GitHub's hosted aarch64 runners have no /dev/kvm — there is no
+  # nested virtualisation on them at all. `nix flake check` does define these for aarch64;
+  # run them on your own hardware, or a self-hosted arm runner, if you want that coverage.
   vm-tests:
-    name: NixOS VM tests (${{ matrix.system }})
-    runs-on: ${{ matrix.runner }}
+    name: NixOS VM tests
+    runs-on: ubuntu-latest
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            system: x86_64-linux
-          - runner: ubuntu-24.04-arm
-            system: aarch64-linux
     steps:
       - uses: actions/checkout@v4
 
       - name: Enable KVM
-        # GitHub's ubuntu runners have nested virtualisation but do not grant access to
-        # /dev/kvm by default. Without this the tests fall back to emulation and time out.
+        # The runners have nested virtualisation but do not grant access to /dev/kvm by
+        # default. Without it the tests fall back to emulation and time out, so fail loudly
+        # rather than spending an hour finding out.
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          test -w /dev/kvm || { echo "::error::/dev/kvm is not writable; the VM tests cannot run here"; exit 1; }
 
       - name: Free up disk space
         # Nextcloud plus two NixOS systems does not fit alongside the runner's preinstalled
@@ -106,7 +114,7 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Workbench boots, and is not exposed
-        run: nix build .#checks.${{ matrix.system }}.shell-boots --print-build-logs
+        run: nix build .#checks.x86_64-linux.shell-boots --print-build-logs
 
       - name: Services come up behind the proxy
-        run: nix build .#checks.${{ matrix.system }}.services-health --print-build-logs
+        run: nix build .#checks.x86_64-linux.services-health --print-build-logs
