@@ -1,0 +1,24 @@
+# nspawn settings for the workbench on a non-NixOS host, installed by lani-deploy to
+# /etc/systemd/nspawn/lani-shell.nspawn. The bind-mount paths below are examples — adjust
+# them. Unused on NixOS; the module declares the equivalent.
+[Exec]
+Boot=on
+
+[Network]
+# Share the host's network namespace: no bridge or veth setup needed. The container's
+# sshd is on 2222 to stay out of the host sshd's way.
+VirtualEthernet=no
+# Resolve through the host's servers, including whatever your router serves for LAN names.
+ResolvConf=bind-host
+
+[Files]
+# The encrypted home, unsealed by lani-home.service before this container starts.
+# Change `lani` to match lani.user if you set a different account name.
+Bind=/run/lani-shell/home:/home/lani
+
+# The services repository agents edit. Point this at wherever you keep it.
+Bind=/srv/lani-services:/etc/nixos
+
+# CI hand-off: agents queue build requests here, the host's runner picks them up.
+Bind=/var/lib/lani-ci:/var/lib/lani-ci
+Bind=/var/lib/lani:/var/lib/lani

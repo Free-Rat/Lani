@@ -1,0 +1,14 @@
+# Host-side settings for the EPHEMERAL test container (booted by host/lani-ci, then
+# torn down). Same image and same network model as the real container, but NO persistent
+# data bind — every run starts clean.
+# Deploy to: /etc/systemd/nspawn/lani-services-test.nspawn  (on the target host)
+[Exec]
+Boot=on
+
+[Network]
+VirtualEthernet=yes
+Bridge=br0
+
+[Files]
+# Dummy admin password seeded by host/lani-ci for each run. No data bind -> ephemeral.
+Bind=/var/lib/lani-ci/nextcloud-admin-pass:/etc/nextcloud-admin-pass

@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Cheap and fast: formatting, the catalog consistency check, and proof that every
+  # configuration still evaluates. This is what catches most breakage, and it runs in
+  # a couple of minutes.
+  check:
+    name: Evaluate and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Formatting
+        run: nix build .#checks.x86_64-linux.formatting --print-build-logs
+
+      - name: Catalog consistency
+        run: nix build .#checks.x86_64-linux.catalog-consistency --print-build-logs
+
+      - name: The CLI builds
+        run: nix build .#lani-cli --print-build-logs
+
+      - name: Every configuration evaluates
+        run: |
+          nix eval .#nixosConfigurations.lani-vm.config.system.build.toplevel.drvPath
+          nix eval .#nixosConfigurations.lani-shell-image.config.system.build.tarball.drvPath
+
+      - name: The catalog stands alone as a flake
+        run: nix flake check ./catalog --print-build-logs
+
+      - name: A clean checkout still builds a host from the template
+        # The whole point of the template. Uses the local checkout rather than the
+        # published flake so a pull request tests itself.
+        run: |
+          tmp="$(mktemp -d)"
+          cp -r templates/host/. "$tmp/"
+          cd "$tmp"
+          # No hardware-configuration.nix on a runner, so stub what a real machine would
+          # have generated and check that everything else evaluates.
+          cat > hardware-configuration.nix <<'EOF'
+          { ... }: {
+            boot.loader.grub.enable = false;
+            fileSystems."/" = { device = "none"; fsType = "tmpfs"; };
+          }
+          EOF
+          git init -q . && git add -A
+          # No lock file is written: --override-input points at a working tree, and nix
+          # refuses to lock against one. Evaluating is the point here anyway.
+          nix eval --override-input lani "$GITHUB_WORKSPACE" \
+            .#nixosConfigurations.myhost.config.system.build.toplevel.drvPath
+
+  # The VM tests boot real machines and are slow. Kept separate so a formatting mistake
+  # does not cost half an hour before anyone finds out.
+  #
+  # Run on both architectures: Lani is deployed on aarch64 as often as x86_64, and a test
+  # that only ever runs on one of them is how you find out the hard way that something was
+  # architecture-specific.
+  vm-tests:
+    name: NixOS VM tests (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        # GitHub's ubuntu runners have nested virtualisation but do not grant access to
+        # /dev/kvm by default. Without this the tests fall back to emulation and time out.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Free up disk space
+        # Nextcloud plus two NixOS systems does not fit alongside the runner's preinstalled
+        # toolchains.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Workbench boots, and is not exposed
+        run: nix build .#checks.${{ matrix.system }}.shell-boots --print-build-logs
+
+      - name: Services come up behind the proxy
+        run: nix build .#checks.${{ matrix.system }}.services-health --print-build-logs

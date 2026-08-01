@@ -1,0 +1,54 @@
+#compdef lani
+
+_lani_module_names() {
+  local catalog_repo="${LANI_CATALOG:-}"
+  local -a names
+  local nix
+  nix=$(command -v nix 2>/dev/null) || return
+  if [[ -n "$catalog_repo" && -f "${catalog_repo}/catalog.nix" ]]; then
+    local raw
+    raw=$("$nix" eval --raw --apply \
+      'mods: builtins.concatStringsSep "\n" (map (m: m.name) mods)' \
+      -f "${catalog_repo}/catalog.nix" 2>/dev/null) || return
+    names=("${(@f)raw}")
+  fi
+  _describe 'module' names
+}
+
+_lani_modules() {
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
+
+  _arguments -C \
+    "1:action:(list use status)" \
+    "*::arg:->args" \
+    && return 0
+
+  case $state in
+    args)
+      case $line[1] in
+        use) _lani_module_names ;;
+      esac
+      ;;
+  esac
+}
+
+_lani() {
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
+
+  _arguments -C \
+    "1:subcommand:(modules)" \
+    "*::arg:->args" \
+    && return 0
+
+  case $state in
+    args)
+      case $line[1] in
+        modules) _lani_modules ;;
+      esac
+      ;;
+  esac
+}
+
+_lani "$@"

@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+*.nix   text diff=nix
+*.sh    text eol=lf
+*.mjs   text
+*.json  text
+*.md    text
+
+flake.lock linguist-generated=true
+LICENSE    linguist-vendored=true

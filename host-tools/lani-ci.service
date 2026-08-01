@@ -1,0 +1,9 @@
+[Unit]
+Description=Run queued Lani config tests in an ephemeral nspawn container
+# Deploy to: /etc/systemd/system/lani-ci.service  (on the target host)
+
+[Service]
+Type=oneshot
+# Serial by design: one run drains the whole queue; the .path unit re-triggers if new
+# requests arrive while a run is in progress.
+ExecStart=/usr/local/lib/lani/lani-ci

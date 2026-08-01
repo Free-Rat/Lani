@@ -1,0 +1,16 @@
+[Unit]
+Description=Unseal the workbench encrypted home (LUKS)
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The unseal key is a persistent, Pi-LOCAL file (NOT on the NFS repo / not in /etc/nixos,
+# so it never lands in the world-readable /nix/store on a rebuild). systemd copies it into
+# the service's private credentials dir; the helper reads $CREDENTIALS_DIRECTORY/home-key
+# first. Because it is on local disk, the home unseals automatically across reboots with no
+# manual key step. Keep it root-owned 0400.
+LoadCredential=home-key:/var/lib/lani-shell/home.key
+ExecStart=/usr/local/lib/lani/lani-home unseal
+ExecStop=/usr/local/lib/lani/lani-home seal
+TimeoutStartSec=120

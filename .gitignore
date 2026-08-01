@@ -1,0 +1,32 @@
+# Nix build outputs
+result
+result-*
+*.drv
+
+# Local Nix evaluation caches
+.direnv/
+.pre-commit-config.yaml.bak
+
+# Secrets and generated credentials — never commit these
+*.admin-pass
+*-admin-pass
+*.key
+!**/*.key.example
+secrets/
+
+# Runtime state that leaks into the tree when the CI queue is bind-mounted
+lani-ci/
+*.tar.xz
+
+# Git worktrees created by `lani modules use` — runtime only
+services.worktrees/
+
+# Agent/editor workspace config — machine-local, may contain tool permissions
+.claude/
+.cursor/
+.idea/
+.vscode/
+
+# macOS resource-fork shadow files (written by Finder over NFS/SMB)
+._*
+.DS_Store

@@ -1,0 +1,587 @@
+#!/usr/bin/env bash
+# lani — service catalog and test-run manager for a Lani host
+#
+# Reads the catalog from $LANI_CATALOG and drives the services repository at
+# $LANI_SERVICES. Both are set for you inside the workbench container.
+#
+# Usage:
+#   lani modules list
+#   lani modules use <name>
+#   lani modules status
+#
+# SC2059 is excluded in cli/default.nix, not here: writeShellApplication prepends its own
+# header, so a file-level directive would come after a command and be ignored.
+set -euo pipefail
+
+# ── colors ──────────────────────────────────────────────────────────────────────
+# Respects NO_COLOR (https://no-color.org/) and non-terminal stdout.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  R=$'\e[0m'    B=$'\e[1m'    DIM=$'\e[2m'
+  CYN=$'\e[36m'
+  BCYN=$'\e[96m' BYLW=$'\e[93m' BRED=$'\e[91m' BGRN=$'\e[92m' BWHT=$'\e[97m'
+else
+  R='' B='' DIM='' CYN='' BCYN='' BYLW='' BRED='' BGRN='' BWHT=''
+fi
+
+_SEP="$(printf '%0.s─' $(seq 1 72))"
+sep()  { printf "${DIM}%s${R}\n"                      "$_SEP"; }
+hdr()  { printf "\n  ${B}${BCYN}%s${R}  ${DIM}%s${R}\n" "$1" "${2:-}"; }
+info() { printf "\n  ${BCYN}▸${R}  %s\n"              "$*"; }
+ok()   { printf "  ${BGRN}✓${R}  %s\n"                "$*"; }
+die()  { printf "\n  ${BRED}✗${R}  %s\n\n" "$*" >&2; exit 1; }
+
+# ── CI status helpers ────────────────────────────────────────────────────────────
+
+# _hl_write_status name started phase result detail log_base status_file
+# phase: post_scaffold | build | test | pass | fail
+_hl_write_status() {
+  local name="$1" started="$2" phase="$3" result="${4:-}" detail="${5:-}" \
+        log_base="$6" status_file="$7"
+  local s0 s1 s2 s3
+  case "$phase" in
+    post_scaffold) s0="done";  s1="pending"; s2="pending"; s3="pending" ;;
+    build)         s0="done";  s1="running"; s2="pending"; s3="pending" ;;
+    test)          s0="done";  s1="done";    s2="running"; s3="pending" ;;
+    pass)          s0="done";  s1="done";    s2="done";    s3="done"    ;;
+    fail)          s0="done";  s1="done";    s2="fail";    s3="fail"    ;;
+    *)             s0="done";  s1="pending"; s2="pending"; s3="pending" ;;
+  esac
+  local rj dj
+  [ -n "$result" ] && rj="\"$result\"" || rj=null
+  [ -n "$detail" ] && dj="\"${detail//\"/\\\"}\"" || dj=null
+  cat > "$status_file" <<_STATUS_EOF
+{
+  "name": "$name",
+  "started": "$started",
+  "phases": [
+    { "key": "scaffold", "label": "Scaffolding", "status": "$s0" },
+    { "key": "build",    "label": "Building",    "status": "$s1" },
+    { "key": "test",     "label": "Testing",     "status": "$s2" },
+    { "key": "done",     "label": "Done",        "status": "$s3" }
+  ],
+  "log": "$log_base",
+  "result": $rj,
+  "detail": $dj
+}
+_STATUS_EOF
+}
+
+_hl_gen_dashboard() {
+  local ci_dir="$1"
+  cat > "${ci_dir}/index.html" << 'DASH_EOF'
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lani CI</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5}
+header{background:#161b22;border-bottom:1px solid #30363d;padding:12px 24px;display:flex;align-items:center;gap:10px}
+.hdr-logo{font-size:15px;font-weight:700;color:#58a6ff}
+.hdr-sep{color:#30363d}
+.hdr-mod{font-size:14px;color:#c9d1d9;font-weight:600}
+.hdr-ts{font-size:11px;color:#6e7681;margin-left:auto}
+.phases{display:flex;align-items:stretch;padding:16px 24px;gap:0;flex-wrap:wrap}
+.ph-conn{width:24px;display:flex;align-items:center;justify-content:center;color:#30363d;font-size:14px;flex-shrink:0}
+.ph{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 16px;min-width:120px}
+.ph-label{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:#6e7681;margin-bottom:5px}
+.ph-st{font-size:13px;font-weight:600;display:flex;align-items:center;gap:5px}
+.ph-st.done{color:#3fb950}.ph-st.running{color:#58a6ff}.ph-st.pending{color:#484f58}.ph-st.fail{color:#f85149}
+.spin{width:11px;height:11px;flex-shrink:0;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#result{margin:0 24px 12px;padding:10px 16px;border-radius:6px;font-weight:600;font-size:13px;display:none}
+#result.pass{background:#0a2516;border:1px solid #3fb950;color:#3fb950}
+#result.fail{background:#2d0e0e;border:1px solid #f85149;color:#f85149}
+.log-wrap{margin:0 24px 24px}
+.log-hdr{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#6e7681;margin-bottom:6px}
+#log{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px 14px;font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:12px;line-height:1.65;overflow-y:auto;max-height:55vh;white-space:pre-wrap;word-break:break-all;color:#c9d1d9}
+.blink{animation:blink 1s step-end infinite}@keyframes blink{50%{opacity:0}}
+</style></head><body>
+<header>
+  <span class="hdr-logo">Lani CI</span>
+  <span class="hdr-sep">/</span>
+  <span class="hdr-mod" id="hdr-mod">—</span>
+  <span class="hdr-ts" id="hdr-ts"></span>
+</header>
+<div class="phases" id="phases"><div style="color:#484f58;padding:4px 0">Loading…</div></div>
+<div id="result"></div>
+<div class="log-wrap">
+  <div class="log-hdr">Agent output</div>
+  <div id="log">Waiting for agent to start<span class="blink">▌</span></div>
+</div>
+<script>
+const q=new URLSearchParams(location.search),mod=q.get('m')||'';
+let logFile=null;
+function phIcon(s){
+  if(s==='done')    return '<span>✓</span>';
+  if(s==='running') return '<span class="spin"></span>';
+  if(s==='fail')    return '<span>✗</span>';
+  return '<span style="opacity:.35">·</span>';
+}
+function renderPhases(ph){
+  document.getElementById('phases').innerHTML=ph.map((p,i)=>
+    (i>0?'<div class="ph-conn">›</div>':'')+
+    `<div class="ph"><div class="ph-label">${p.label}</div>`+
+    `<div class="ph-st ${p.status}">${phIcon(p.status)} ${p.status}</div></div>`
+  ).join('');
+}
+async function tick(){
+  try{
+    const r=await fetch(`status/${mod}.json?_=${Date.now()}`);
+    if(r.ok){
+      const s=await r.json();
+      document.getElementById('hdr-mod').textContent=s.name||mod;
+      if(s.started)document.getElementById('hdr-ts').textContent='started '+s.started;
+      if(s.phases)renderPhases(s.phases);
+      if(s.result){
+        const b=document.getElementById('result');
+        b.className=s.result;
+        b.textContent=s.result==='pass'
+          ?'✓  '+(s.name||mod)+' passed all health checks'
+          :'✗  Failed — '+(s.detail||'see log below');
+        b.style.display='';
+      }
+      if(s.log&&s.log!==logFile)logFile=s.log;
+    }
+  }catch(_){}
+  if(logFile){
+    try{
+      const r2=await fetch(`logs/${logFile}?_=${Date.now()}`);
+      if(r2.ok){
+        const txt=await r2.text();
+        const box=document.getElementById('log');
+        const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<80;
+        box.textContent=txt||'(no output yet)';
+        if(atBottom)box.scrollTop=box.scrollHeight;
+      }
+    }catch(_){}
+  }
+  setTimeout(tick,2000);
+}
+if(mod)tick();
+else document.getElementById('log').textContent='Open with ?m=<module-name>';
+</script></body></html>
+DASH_EOF
+}
+
+# ── paths ───────────────────────────────────────────────────────────────────────
+# Set by the Lani module; the defaults are for running the CLI by hand.
+CATALOG_REPO="${LANI_CATALOG:-}"
+SERVICES_REPO="${LANI_SERVICES:-/etc/nixos}"
+WORKTREES_DIR="${LANI_WORKTREES:-${SERVICES_REPO}/.lani-worktrees}"
+CATALOG_NIX="${CATALOG_REPO%/}/catalog.nix"
+
+NIX=$(command -v nix || die "required command not found: nix")
+GIT=$(command -v git || die "required command not found: git")
+
+# ── catalog helpers ─────────────────────────────────────────────────────────────
+# Lazy, so `lani --help` works without a configured catalog.
+require_catalog() {
+  [ -n "$CATALOG_REPO" ] || die "LANI_CATALOG is not set — point it at a catalog checkout"
+  [ -f "$CATALOG_NIX" ] || die "catalog not found: $CATALOG_NIX"
+}
+
+# TSV once, then plain shell: cheaper than a `nix eval` per lookup, and it keeps user
+# input out of Nix expressions.
+catalog_tsv() {
+  require_catalog
+  "$NIX" eval --raw --apply \
+    'mods: builtins.concatStringsSep "\n" (map (m:
+       m.name + "\t" + m.subdomain + "\t" + (toString m.port) + "\t" + m.description
+     ) mods)' \
+    -f "$CATALOG_NIX" 2>/dev/null \
+    || die "failed to evaluate $CATALOG_NIX"
+}
+
+# Matching in awk, not by splicing $1 into a Nix expression — that was an
+# arbitrary-expression injection point.
+lookup_field() {
+  local mod_name="$1" field="$2" column
+  case "$field" in
+    name) column=1 ;;
+    subdomain) column=2 ;;
+    port) column=3 ;;
+    description) column=4 ;;
+    *) die "unknown catalog field: $field" ;;
+  esac
+  catalog_tsv | awk -F'\t' -v want="$mod_name" -v col="$column" \
+    '$1 == want { print $col; found = 1 } END { exit !found }' || true
+}
+
+module_exists() {
+  local result
+  result=$(lookup_field "$1" "name") && [ -n "$result" ]
+}
+
+catalog_version() {
+  "$GIT" -C "$CATALOG_REPO" rev-parse --short HEAD 2>/dev/null && return
+  # A flake-input catalog is a store path; its hash is the closest thing to a version.
+  basename "$CATALOG_REPO" | cut -c1-7
+}
+
+# ── worktree / branch status ────────────────────────────────────────────────────
+module_status() {
+  local name="$1"
+  if "$GIT" -C "$SERVICES_REPO" worktree list --porcelain 2>/dev/null \
+      | grep -q "^branch refs/heads/feat/${name}$"; then
+    echo "in progress"
+    return
+  fi
+  if grep -qF "./${name}.nix" "${SERVICES_REPO}/modules/default.nix" 2>/dev/null; then
+    echo "installed"
+    return
+  fi
+  echo "available"
+}
+
+# Print a colored badge; set BADGE_VIS (visible char count) for manual padding.
+# Unicode bullets are 3 UTF-8 bytes but 1 display column — hardcode visual widths.
+_badge() {
+  case "$1" in
+    installed)     printf "${BGRN}● installed${R}";    BADGE_VIS=11 ;;
+    "in progress") printf "${BYLW}◐ in progress${R}";  BADGE_VIS=13 ;;
+    available)     printf "${DIM}○ available${R}";     BADGE_VIS=11 ;;
+    pass)          printf "${BGRN}✓ pass${R}";         BADGE_VIS=6  ;;
+    fail)          printf "${BRED}✗ fail${R}";         BADGE_VIS=6  ;;
+    pending)       printf "${BYLW}· pending${R}";      BADGE_VIS=9  ;;
+    "?")           printf "${DIM}? unknown${R}";       BADGE_VIS=9  ;;
+    *)             printf "${DIM}%s${R}" "$1";         BADGE_VIS=${#1} ;;
+  esac
+}
+
+# ── modules list ────────────────────────────────────────────────────────────────
+cmd_modules_list() {
+  local ver
+  ver=$(catalog_version)
+  hdr "lani modules" "catalog @ ${ver}"
+  printf "\n"
+  sep
+  printf "\n"
+
+  while IFS=$'\t' read -r name subdomain port desc || [ -n "$name" ]; do
+    [ -z "$name" ] && continue
+    local status
+    status=$(module_status "$name")
+
+    # Name — color driven by status, padded to 18 chars (longest: "uptime-kuma" = 11)
+    case "$status" in
+      installed)     printf "  ${B}${BGRN}%-18s${R}" "$name" ;;
+      "in progress") printf "  ${B}${BYLW}%-18s${R}" "$name" ;;
+      *)             printf "  ${B}${BWHT}%-18s${R}" "$name" ;;
+    esac
+
+    # Subdomain as .local URL, padded to 20 chars ("vaultwarden.local" = 17)
+    printf "  ${CYN}%-20s${R}" "${subdomain}.local"
+
+    # Port, dim, padded to 6
+    printf "  ${DIM}%-6s${R}" "$port"
+
+    # Status badge
+    printf "  "
+    _badge "$status"
+    printf "\n"
+
+    # Description on its own indented dim line
+    printf "  ${DIM}    %s${R}\n\n" "$desc"
+
+  done < <(catalog_tsv)
+
+  sep
+  printf "\n  ${DIM}Run ${R}${B}lani modules use <name>${R}${DIM} to install.${R}\n\n"
+}
+
+# ── modules use ─────────────────────────────────────────────────────────────────
+cmd_modules_use() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "usage: lani modules use <name>"
+
+  module_exists "$name" || die "module '${name}' not found in catalog — run 'lani modules list'"
+
+  local subdomain port
+  subdomain=$(lookup_field "$name" "subdomain") || die "could not read subdomain for $name"
+  port=$(     lookup_field "$name" "port")      || die "could not read port for $name"
+
+  local src_module="${CATALOG_REPO}/modules/${name}/module.nix"
+  [ -f "$src_module" ] || die "module.nix not found at $src_module"
+
+  local worktree_path="${WORKTREES_DIR}/${name}"
+  [ -d "$worktree_path" ] && die "worktree already exists: $worktree_path"
+  "$GIT" -C "$SERVICES_REPO" show-ref --verify --quiet "refs/heads/feat/${name}" 2>/dev/null \
+    && die "branch feat/${name} already exists"
+
+  hdr "Installing ${name}" "${subdomain}.local  :${port}"
+  printf "\n"
+
+  info "Creating worktree feat/${name}..."
+  mkdir -p "$WORKTREES_DIR"
+  "$GIT" -C "$SERVICES_REPO" worktree add "$worktree_path" -b "feat/${name}"
+  ok "Worktree ready → ${DIM}${worktree_path}${R}"
+
+  info "Installing modules/${name}.nix..."
+  cp "$src_module" "${worktree_path}/modules/${name}.nix"
+
+  local default_nix="${worktree_path}/modules/default.nix"
+  if grep -qF "./${name}.nix" "$default_nix"; then
+    ok "Import line already present"
+  else
+    sed -i "s|^  \];|    ./${name}.nix\n  \];|" "$default_nix"
+    ok "Import added to modules/default.nix"
+  fi
+
+  info "Committing..."
+  "$GIT" -C "$worktree_path" add "modules/${name}.nix" "modules/default.nix"
+  "$GIT" -C "$worktree_path" commit -m "$(cat <<COMMITMSG
+feat(${name}): add catalog module
+
+subdomain=${subdomain}.local  port=${port}
+Auto-installed by: lani modules use ${name}
+COMMITMSG
+)"
+  ok "Committed feat/${name}"
+
+  # ── CI status tracking + web dashboard ─────────────────────────────────────────
+  local CI_DIR="/var/lib/lani-ci"
+  local have_ci=false
+  local log_file="" status_file="" ts_iso=""
+  local web_port=9000
+
+  if mkdir -p "${CI_DIR}/logs" "${CI_DIR}/status" 2>/dev/null; then
+    have_ci=true
+    ts_iso="$(date -Iseconds)"
+    log_file="${CI_DIR}/logs/${name}-$(date +%s).log"
+    status_file="${CI_DIR}/status/${name}.json"
+    _hl_write_status "$name" "$ts_iso" post_scaffold "" "" \
+      "$(basename "$log_file")" "$status_file"
+    _hl_gen_dashboard "$CI_DIR"
+
+    # Dashboard file server, idempotent. Loopback only: it serves build logs and has no
+    # authentication. Reach it with ssh -L 9000:127.0.0.1:9000 <host>
+    if ! ss -tlnp 2>/dev/null | grep -qE "127\.0\.0\.1:${web_port}[^0-9]"; then
+      ( exec python3 -m http.server "$web_port" --bind 127.0.0.1 \
+          --directory "$CI_DIR" >"${CI_DIR}/logs/dashboard-server.log" 2>&1 ) &
+      disown
+    fi
+
+    # Background phase monitor: watches log + results dir, updates status JSON
+    (
+      last_phase="post_scaffold"
+      while true; do
+        sleep 3
+        [ -f "$log_file" ] || continue
+        if [ "$last_phase" = post_scaffold ] && grep -q '\[1/3\]' "$log_file" 2>/dev/null; then
+          last_phase="build"
+          _hl_write_status "$name" "$ts_iso" build "" "" \
+            "$(basename "$log_file")" "$status_file"
+        fi
+        if [ "$last_phase" = build ] && grep -qE '\[2/3\]|\[3/3\]' "$log_file" 2>/dev/null; then
+          last_phase="test"
+          _hl_write_status "$name" "$ts_iso" test "" "" \
+            "$(basename "$log_file")" "$status_file"
+        fi
+        # shellcheck disable=SC2012  # generated names, no exotic characters
+        rf=$(ls -t "${CI_DIR}/results/feat-${name}-"*.json 2>/dev/null | head -1 || true)
+        if [ -n "$rf" ] && [ -f "$rf" ]; then
+          cs=$(grep -o '"status":"[^"]*"' "$rf" | head -1 | cut -d'"' -f4 || echo fail)
+          cd_val=$(grep -o '"detail":"[^"]*"' "$rf" | head -1 | cut -d'"' -f4 || echo "")
+          _hl_write_status "$name" "$ts_iso" "$cs" "$cs" "$cd_val" \
+            "$(basename "$log_file")" "$status_file"
+          break
+        fi
+      done
+    ) &
+    disown
+  fi
+
+  # ── Build agent prompt + wrapper script ─────────────────────────────────────
+  # Whichever agent is installed; the default set is free software. Override with LANI_AGENT.
+  local AGENT_BIN AGENT_ARGS
+  if [ -n "${LANI_AGENT:-}" ]; then
+    AGENT_BIN=$(command -v "$LANI_AGENT") || die "LANI_AGENT=$LANI_AGENT not found on PATH"
+  else
+    AGENT_BIN=$(command -v pi || command -v claude || command -v opencode || true)
+  fi
+  [ -n "$AGENT_BIN" ] || die "no coding agent found — install one, or set LANI_AGENT"
+
+  case "$(basename "$AGENT_BIN")" in
+    opencode) AGENT_ARGS="run" ;;
+    *) AGENT_ARGS="-p" ;;
+  esac
+
+  local service_url="http://${subdomain}.local"
+  local prompt_file agent_script
+  prompt_file=$(mktemp /tmp/lani-prompt-XXXXXX)
+  agent_script=$(mktemp /tmp/lani-agent-XXXXXX.sh)
+
+  cat > "$prompt_file" <<PROMPT_EOF
+You are a Lani test agent. Your working directory is the feat/${name} worktree at ${worktree_path}.
+
+Tasks:
+1. Run ./request-test.sh from ${worktree_path}. It exits 0=pass, 1=fail, 2=timeout.
+2. Report:
+   - PASS: "PASS: ${name} is live at ${service_url}"
+   - FAIL: "FAIL: ${name} health checks failed — <reason from result JSON>"
+   - ERROR: "ERROR: test runner timed out or could not build"
+
+Do not edit files or amend the commit. Just run the test and report.
+
+Start: cd ${worktree_path} && ./request-test.sh
+PROMPT_EOF
+
+  # Build the agent wrapper. Log output via tee when CI dir is available.
+  if $have_ci; then
+    cat > "$agent_script" <<AGENT_EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd $(printf '%q' "$worktree_path")
+$(printf '%q' "$AGENT_BIN") $AGENT_ARGS "\$(< $(printf '%q' "$prompt_file"))" 2>&1 \
+  | tee $(printf '%q' "$log_file")
+echo
+printf '\n  ══════ lani:${name} agent done ══════\n\n'
+read -r _unused
+AGENT_EOF
+  else
+    cat > "$agent_script" <<AGENT_EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd $(printf '%q' "$worktree_path")
+$(printf '%q' "$AGENT_BIN") $AGENT_ARGS "\$(< $(printf '%q' "$prompt_file"))"
+echo
+printf '\n  ══════ lani:${name} agent done ══════\n\n'
+read -r _unused
+AGENT_EOF
+  fi
+  chmod +x "$agent_script"
+
+  # ── Launch ──────────────────────────────────────────────────────────────────
+  printf "\n"
+  sep
+  if $have_ci; then
+    printf "  ${BCYN}▸${R}  Dashboard: ${B}http://localhost:${web_port}/?m=${name}${R}\n"
+  fi
+
+  local ZELLIJ_BIN BASH_BIN
+  ZELLIJ_BIN=$(command -v zellij 2>/dev/null || true)
+  BASH_BIN=$(command -v bash)
+
+  if [ -n "$ZELLIJ_BIN" ]; then
+    # Spawn the test agent in its OWN detached session (not a tab in the caller's
+    # session), so it shows up in the session manager and never disrupts the current
+    # window. A backgrounded zellij session needs a layout to run a command.
+    local sess="lani-${name}-test"
+    local layout_file
+    layout_file=$(mktemp /tmp/lani-layout-XXXXXX.kdl)
+    cat > "$layout_file" <<LAYOUT_EOF
+layout {
+    default_tab_template {
+        pane size=1 borderless=true { plugin location="zellij:tab-bar"; }
+        children
+    }
+    tab name="lani:${name}" focus=true {
+        pane cwd="${worktree_path}" command="${BASH_BIN}" {
+            args "${agent_script}"
+        }
+    }
+}
+LAYOUT_EOF
+    # Unset ZELLIJ so this isn't treated as a (refused) nested-session request when
+    # `lani` is itself run from inside a zellij session.
+    if ( unset ZELLIJ; "$ZELLIJ_BIN" --layout "$layout_file" attach --create-background "$sess" ) >/dev/null 2>&1; then
+      ok "Spawned session  ${B}${sess}${R}"
+      printf "  ${DIM}    Open it from the session manager, or:${R} ${B}zellij attach ${sess}${R}\n"
+    else
+      # Fallback (older zellij / no --create-background): open a tab in the current session.
+      "$ZELLIJ_BIN" action new-tab --name "lani:${name}" --cwd "$worktree_path" \
+        -- "$BASH_BIN" "$agent_script" \
+        && ok "Opened tab  ${B}lani:${name}${R}  ← switch to watch"
+    fi
+  else
+    printf "  ${DIM}zellij not found — running agent here.${R}\n"
+    sep
+    printf "\n"
+    cd "$worktree_path"
+    exec bash "$agent_script"
+  fi
+  printf "\n"
+}
+
+# ── modules status ──────────────────────────────────────────────────────────────
+cmd_modules_status() {
+  local results_dir="/var/lib/lani-ci/results"
+
+  hdr "lani CI status" "active worktrees"
+  printf "\n"
+  printf "  ${DIM}${B}%-35s  %-14s  %-18s  %s${R}\n" "BRANCH" "STATUS" "TIME" "DETAIL"
+  sep
+
+  while IFS=$'\t' read -r wt_path branch_ref; do
+    local branch="${branch_ref#refs/heads/}"
+    [[ "$wt_path" == "$SERVICES_REPO" ]] && continue
+
+    local ci_status="pending" ci_time="—" ci_detail="—"
+    local slug="${branch//\//-}"
+
+    if [ -d "$results_dir" ]; then
+      local latest
+      # shellcheck disable=SC2012
+      latest=$(ls -t "${results_dir}/${slug}"*.json 2>/dev/null | head -1 || true)
+      if [ -n "$latest" ] && [ -f "$latest" ]; then
+        ci_status=$("$NIX" eval --raw --apply \
+          '(j: (builtins.fromJSON j).status)' --expr "builtins.readFile \"${latest}\"" \
+          2>/dev/null || echo "?")
+        ci_time=$("$NIX" eval --raw --apply \
+          '(j: builtins.substring 0 16 (builtins.fromJSON j).ts)' \
+          --expr "builtins.readFile \"${latest}\"" 2>/dev/null || echo "—")
+        ci_detail=$("$NIX" eval --raw --apply \
+          '(j: (builtins.fromJSON j).detail)' --expr "builtins.readFile \"${latest}\"" \
+          2>/dev/null || echo "—")
+      fi
+    fi
+
+    printf "  ${CYN}%-35s${R}  " "$branch"
+    _badge "$ci_status"
+    # Pad badge column to 14 visible chars
+    printf "%$(( 14 - BADGE_VIS ))s" ""
+    printf "  ${DIM}%-18s${R}  ${DIM}%s${R}\n" "$ci_time" "$ci_detail"
+
+  done < <(
+    "$GIT" -C "$SERVICES_REPO" worktree list --porcelain 2>/dev/null \
+    | awk '/^worktree /{wt=$2} /^branch /{print wt"\t"$2}'
+  )
+
+  printf "\n"
+}
+
+# ── usage ────────────────────────────────────────────────────────────────────────
+usage() {
+  printf "\n  ${B}${BCYN}lani${R}  ${DIM}service catalog and test runner${R}\n\n"
+  sep
+  printf "\n"
+  printf "  ${B}Usage:${R}   lani ${CYN}<subcommand>${R} ${DIM}[args]${R}\n\n"
+  printf "  ${B}Commands:${R}\n"
+  printf "    ${BCYN}modules list${R}              List catalog modules and install status\n"
+  printf "    ${BCYN}modules use${R} ${DIM}<name>${R}        Install a module and run CI tests\n"
+  printf "    ${BCYN}modules status${R}            Show active worktrees and CI results\n"
+  printf "\n"
+  printf "  ${B}Environment:${R}\n"
+  printf "    ${DIM}LANI_CATALOG${R}    catalog checkout containing catalog.nix\n"
+  printf "    ${DIM}LANI_SERVICES${R}   services repository agents edit  ${DIM}(%s)${R}\n" "$SERVICES_REPO"
+  printf "    ${DIM}LANI_WORKTREES${R}  where feature worktrees are created\n"
+  printf "    ${DIM}LANI_AGENT${R}      coding agent to drive  ${DIM}(default: first of pi, claude, opencode)${R}\n"
+  printf "\n"
+  sep
+  printf "\n"
+  exit "${1:-1}"
+}
+
+# ── dispatch ────────────────────────────────────────────────────────────────────
+case "${1:-}" in
+  modules)
+    case "${2:-}" in
+      list)   cmd_modules_list ;;
+      use)    cmd_modules_use "${3:-}" ;;
+      status) cmd_modules_status ;;
+      *)      usage ;;
+    esac
+    ;;
+  -h | --help | help) usage 0 ;;
+  *) usage ;;
+esac

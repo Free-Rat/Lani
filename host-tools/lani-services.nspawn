@@ -1,0 +1,19 @@
+# Host-side settings for the persistent Lani services container.
+# Deploy to: /etc/systemd/nspawn/lani-services.nspawn  (on the target host)
+[Exec]
+Boot=on
+
+[Network]
+# Unlike lani-shell, lani-services has its own network namespace: a veth pair joined to the
+# host bridge br0, so it gets its own LAN IP (DHCP, configured inside the container).
+# br0 must exist on the Debian host and carry the LAN — see host/setup-host.sh.
+VirtualEthernet=yes
+Bridge=br0
+
+[Files]
+# Nextcloud admin password, provided out of band (never in git / the image). Seed the real
+# secret on the host before first start (host/setup-host.sh creates a random one if missing).
+Bind=/var/lib/lani/nextcloud-admin-pass:/etc/nextcloud-admin-pass
+# Persistent Nextcloud data (incl. the SQLite DB) on the host, so re-import never wipes it.
+# For encryption at rest, back this dir with the LUKS seal/unseal pattern from lani-shell's host/.
+Bind=/var/lib/lani/nextcloud-data:/var/lib/nextcloud

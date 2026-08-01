@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Deploy a Lani container onto a host that is not running NixOS. Builds a rootfs tarball
+# (optionally on another machine), copies it over, installs the nspawn units and imports
+# it. On a NixOS host use the module and `nixos-rebuild switch` instead.
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+lani-deploy — install a Lani container on a non-NixOS host
+
+  lani-deploy --target HOST [options]
+
+Required:
+  --target HOST         ssh destination of the machine to deploy to. Needs
+                        passwordless sudo and either apt or an existing
+                        systemd-container install.
+
+Options:
+  --flake REF           flake to build from     (default: the current directory)
+  --machine NAME        nspawn machine name     (default: lani-shell)
+  --attr ATTR           package attribute       (default: tarball)
+  --build-host HOST     build on this machine over ssh instead of locally. Use
+                        when the target is too slow to build for itself and you
+                        have a faster machine with the right emulation set up.
+  --system SYSTEM       target system           (default: aarch64-linux)
+  --no-luks             skip the encrypted-home unit
+  -h, --help            this
+
+Examples:
+  # From a checkout of your own host flake, onto a Pi:
+  lani-deploy --target pi.local --flake .#tarball
+
+  # Build on a beefy x86_64 box with aarch64 binfmt emulation configured:
+  lani-deploy --target pi.local --build-host builder.local
+
+Everything site-specific is an argument. Nothing here knows about your network.
+USAGE
+}
+
+TARGET=""
+BUILD_HOST=""
+FLAKE="."
+MACHINE="lani-shell"
+ATTR="tarball"
+SYSTEM="aarch64-linux"
+WITH_LUKS=1
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) TARGET="$2"; shift 2 ;;
+    --build-host) BUILD_HOST="$2"; shift 2 ;;
+    --flake) FLAKE="$2"; shift 2 ;;
+    --machine) MACHINE="$2"; shift 2 ;;
+    --attr) ATTR="$2"; shift 2 ;;
+    --system) SYSTEM="$2"; shift 2 ;;
+    --no-luks) WITH_LUKS=0; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+[ -n "$TARGET" ] || {
+  echo "--target is required" >&2
+  usage >&2
+  exit 2
+}
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TARBALL_NAME="nixos-system-${SYSTEM}.tar.xz"
+RELAY="$(mktemp -d)/${TARBALL_NAME}"
+trap 'rm -rf "$(dirname "$RELAY")"' EXIT
+
+echo "==> [1/4] building ${FLAKE}#${ATTR}"
+if [ -n "$BUILD_HOST" ]; then
+  # shellcheck disable=SC2029  # client-side expansion is intended
+  ssh "$BUILD_HOST" "nix build ${FLAKE}#${ATTR} --out-link /tmp/lani-deploy-result --print-build-logs"
+  scp "${BUILD_HOST}:/tmp/lani-deploy-result/tarball/${TARBALL_NAME}" "$RELAY"
+else
+  nix build "${FLAKE}#${ATTR}" --out-link /tmp/lani-deploy-result --print-build-logs
+  cp -L "/tmp/lani-deploy-result/tarball/${TARBALL_NAME}" "$RELAY"
+fi
+
+echo "==> [2/4] copying to ${TARGET}"
+scp "$RELAY" "${TARGET}:/tmp/${TARBALL_NAME}"
+scp "${HERE}/lani-shell.nspawn" "${HERE}/lani-shell-override.conf" "${TARGET}:/tmp/"
+if [ "$WITH_LUKS" -eq 1 ]; then
+  scp "${HERE}/lani-home" "${HERE}/lani-home.service" "${TARGET}:/tmp/"
+fi
+
+echo "==> [3/4] installing on ${TARGET}"
+ssh "$TARGET" MACHINE="$MACHINE" TARBALL_NAME="$TARBALL_NAME" WITH_LUKS="$WITH_LUKS" bash -s <<'REMOTE'
+set -euo pipefail
+
+if command -v apt-get >/dev/null 2>&1; then
+  sudo apt-get update -qq
+  sudo apt-get install -y systemd-container cryptsetup
+elif ! command -v machinectl >/dev/null 2>&1; then
+  echo "machinectl not found and this is not a Debian-family host." >&2
+  echo "Install systemd-container and cryptsetup, then re-run." >&2
+  exit 1
+fi
+
+sudo install -d -m 0755 /etc/systemd/nspawn
+sudo install -m 0644 "/tmp/lani-shell.nspawn" "/etc/systemd/nspawn/${MACHINE}.nspawn"
+
+# See the drop-in itself for what it changes and why.
+sudo install -d -m 0755 "/etc/systemd/system/systemd-nspawn@${MACHINE}.service.d"
+sudo install -m 0644 /tmp/lani-shell-override.conf \
+  "/etc/systemd/system/systemd-nspawn@${MACHINE}.service.d/override.conf"
+
+if [ "$WITH_LUKS" -eq 1 ]; then
+  sudo install -d -m 0755 /usr/local/lib/lani
+  sudo install -m 0755 /tmp/lani-home /usr/local/lib/lani/lani-home
+  sudo install -m 0644 /tmp/lani-home.service /etc/systemd/system/lani-home.service
+
+  # Host-local, generated once. Back it up: without it the volume is unrecoverable.
+  sudo install -d -m 0700 /var/lib/lani-shell
+  if ! sudo test -e /var/lib/lani-shell/home.key; then
+    sudo sh -c 'head -c 64 /dev/urandom > /var/lib/lani-shell/home.key && chmod 0400 /var/lib/lani-shell/home.key'
+    echo "generated /var/lib/lani-shell/home.key — back this up now"
+  fi
+  sudo /usr/local/lib/lani/lani-home create
+fi
+
+sudo systemctl daemon-reload
+
+if machinectl status "$MACHINE" >/dev/null 2>&1; then
+  sudo machinectl stop "$MACHINE" || true
+  sleep 2
+fi
+sudo systemctl reset-failed "systemd-nspawn@${MACHINE}.service" || true
+
+# NixOS images mark /var/empty immutable, so rm -rf fails partway and leaves the machine
+# removed but not re-imported.
+if [ -d "/var/lib/machines/${MACHINE}" ]; then
+  sudo chattr -R -i "/var/lib/machines/${MACHINE}" 2>/dev/null || true
+  sudo rm -rf "/var/lib/machines/${MACHINE}"
+fi
+
+sudo machinectl import-tar "/tmp/${TARBALL_NAME}" "$MACHINE"
+rm -f "/tmp/${TARBALL_NAME}"
+REMOTE
+
+echo "==> [4/4] starting ${MACHINE}"
+# shellcheck disable=SC2029  # MACHINE is resolved locally
+ssh "$TARGET" "sudo machinectl enable ${MACHINE} && sudo machinectl start ${MACHINE} && sleep 3 && machinectl status ${MACHINE} | head -20"
+
+cat <<DONE
+
+Done. Get in with either:
+  ssh -p 2222 <your lani.user>@${TARGET}
+  ssh ${TARGET} -- sudo machinectl shell ${MACHINE}
+DONE

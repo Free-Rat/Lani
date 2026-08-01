@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch the Lani CI queue for test requests
+# Deploy to: /etc/systemd/system/lani-ci.path  (on the target host)
+
+[Path]
+# Fires the service whenever an agent drops a *.req marker into the queue.
+PathExistsGlob=/var/lib/lani-ci/queue/*.req
+Unit=lani-ci.service
+
+[Install]
+WantedBy=multi-user.target

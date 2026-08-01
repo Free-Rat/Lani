@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Unseal and seal the workbench's encrypted home on a host that is not running NixOS.
+# Driven by lani-home.service. On NixOS this is nix/modules/luks-home.nix instead.
+set -euo pipefail
+
+STATE_DIR="${LANI_STATE_DIR:-/var/lib/lani-shell}"
+RUN_DIR="${LANI_RUN_DIR:-/run/lani-shell}"
+IMG="${LANI_HOME_IMG:-${STATE_DIR}/home.img}"
+KEY="${LANI_HOME_KEY:-${STATE_DIR}/home.key}"
+SIZE_GB="${LANI_HOME_SIZE_GB:-8}"
+# Must match lani.user, or the mounted home belongs to nobody the container knows about.
+USER_NAME="${LANI_USER:-lani}"
+# No user namespacing, so these are host uids. NixOS gives the first normal user 1000.
+OWNER_UID="${LANI_UID:-1000}"
+OWNER_GID="${LANI_GID:-100}"
+
+MAP=lani-home
+MNT="${RUN_DIR}/home"
+
+key_file() {
+  if [ -n "${CREDENTIALS_DIRECTORY:-}" ] && [ -r "$CREDENTIALS_DIRECTORY/home-key" ]; then
+    echo "$CREDENTIALS_DIRECTORY/home-key"
+  elif [ -r "$KEY" ]; then
+    echo "$KEY"
+  fi
+}
+
+create() {
+  install -d -m 0700 "$STATE_DIR"
+  if [ ! -f "$KEY" ]; then
+    install -m 0400 /dev/null "$KEY"
+    head -c 64 /dev/urandom >"$KEY"
+    echo "generated $KEY — back it up; there is no recovery without it"
+  fi
+  if [ -f "$IMG" ]; then
+    echo "$IMG already exists, leaving it alone"
+    return
+  fi
+  echo "allocating ${SIZE_GB}G at $IMG"
+  truncate -s "${SIZE_GB}G" "$IMG"
+  cryptsetup luksFormat --batch-mode --type luks2 --key-file "$KEY" "$IMG"
+  cryptsetup luksOpen --key-file "$KEY" "$IMG" "${MAP}-init"
+  mkfs.ext4 -q -L "$MAP" "/dev/mapper/${MAP}-init"
+  local tmp
+  tmp="$(mktemp -d)"
+  mount "/dev/mapper/${MAP}-init" "$tmp"
+  install -d -o "$OWNER_UID" -g "$OWNER_GID" -m 0700 "${tmp}/${USER_NAME}"
+  umount "$tmp"
+  rmdir "$tmp"
+  cryptsetup luksClose "${MAP}-init"
+  echo "created $IMG"
+}
+
+unseal() {
+  install -d -m 0700 "$STATE_DIR" "$RUN_DIR" "$MNT"
+  if [ ! -e "/dev/mapper/$MAP" ]; then
+    local kf
+    kf="$(key_file)"
+    if [ -n "$kf" ]; then
+      cryptsetup luksOpen --key-file "$kf" "$IMG" "$MAP"
+    else
+      # No key file: prompt, which only works from a console.
+      cryptsetup luksOpen "$IMG" "$MAP"
+    fi
+  fi
+  mountpoint -q "$MNT" || mount "/dev/mapper/$MAP" "$MNT"
+}
+
+seal() {
+  mountpoint -q "$MNT" && umount "$MNT" || true
+  [ -e "/dev/mapper/$MAP" ] && cryptsetup luksClose "$MAP" || true
+}
+
+case "${1:-}" in
+  create) create ;;
+  unseal) unseal ;;
+  seal) seal ;;
+  *)
+    echo "usage: $0 {create|unseal|seal}" >&2
+    exit 2
+    ;;
+esac
