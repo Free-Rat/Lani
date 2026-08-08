@@ -36,6 +36,16 @@
 
   services.getty.autologinUser = lib.mkDefault "root";
 
+  # lani-shell shares this VM's own netns (privateNetwork = false), so its ports are
+  # filtered by this host's own firewall, not just QEMU's port forwards below. Without
+  # this, 7681 and 2222 are reachable from nowhere despite nginx/sshd listening fine —
+  # only the forwarded ports that land in a container's separate netns (80/443, via NAT)
+  # get through on their own.
+  networking.firewall.allowedTCPPorts = [
+    7681
+    2222
+  ];
+
   virtualisation.vmVariant = {
     virtualisation = {
       memorySize = 4096;
