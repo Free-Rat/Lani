@@ -50,6 +50,16 @@ in
       "z /etc/nixos 0775 root users - -"
     ];
 
+    # /etc/nixos is root-owned (its group is opened up above, but git cares about the
+    # *owner*), and cfg.user is a different uid — git's own dubious-ownership check
+    # (safe.directory) refuses to touch a repo like that unless told otherwise. This
+    # applies to any real deployment too, not just the demo: a host's actual /etc/nixos
+    # is root-owned the same way.
+    programs.git.enable = true;
+    programs.git.config = {
+      safe.directory = "/etc/nixos";
+    };
+
     nixpkgs.config.allowUnfreePredicate =
       pkg: cfg.shell.enableClaudeCode && lib.getName pkg == "claude-code";
 

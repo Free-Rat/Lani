@@ -4,7 +4,47 @@
 #   http://localhost:8080/      the example site (Host: nextcloud.local for Nextcloud)
 #   http://localhost:7681/      the web terminal
 #   ssh -p 2222 lani@localhost  once you have added a key
-{ lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+let
+  cfg = config.lani;
+
+  # A real deployment's lani.repoPath is a git repo the user creates themselves with
+  # `nix flake init -t github:Free-Rat/Lani#services` — Lani never touches it uninvited.
+  # The demo has nothing to point at, so `lani modules use` would otherwise die at the
+  # very first git command with "not a git repository". Bootstrap it here instead, from
+  # the same template, verbatim — demo-only, gated so it only ever runs once.
+  servicesTemplate = ../templates/services;
+
+  bootstrapServicesRepo = pkgs.writeShellApplication {
+    name = "lani-demo-bootstrap-services-repo";
+    runtimeInputs = [
+      pkgs.git
+      pkgs.coreutils
+    ];
+    text = ''
+      repo=${lib.escapeShellArg cfg.repoPath}
+      shopt -s dotglob
+      cp -r ${servicesTemplate}/* "$repo"/
+      chmod -R u+w "$repo"
+      git -C "$repo" init -q -b main
+      git -C "$repo" config user.email "lani-demo@localhost"
+      git -C "$repo" config user.name "Lani demo bootstrap"
+      git -C "$repo" add -A
+      git -C "$repo" commit -q -m "Initial services repo (demo bootstrap)"
+      # cfg.user only exists as an account *inside* the containers, not on this outer
+      # host — chown-by-name would fail here. Group-write for "users" (which lani.user
+      # is a member of on both sides) is what actually needs to happen, so later
+      # `git worktree add`/commit calls from inside the workbench can touch .git too.
+      chown -R root:users "$repo"
+      chmod -R g+w "$repo"
+    '';
+  };
+in
 {
   lani = {
     enable = true;
@@ -35,6 +75,21 @@
   };
 
   services.getty.autologinUser = lib.mkDefault "root";
+
+  systemd.services.lani-demo-bootstrap-services-repo = {
+    description = "Bootstrap a git-initialized services repo at lani.repoPath (demo only)";
+    after = [ "systemd-tmpfiles-setup.service" ];
+    before = [
+      "container@lani-shell.service"
+      "container@lani-services.service"
+    ];
+    wantedBy = [ "multi-user.target" ];
+    unitConfig.ConditionPathExists = "!${cfg.repoPath}/.git";
+    serviceConfig = {
+      Type = "oneshot";
+      ExecStart = lib.getExe bootstrapServicesRepo;
+    };
+  };
 
   # lani-shell shares this VM's own netns (privateNetwork = false), so its ports are
   # filtered by this host's own firewall, not just QEMU's port forwards below. Without
