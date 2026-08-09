@@ -386,6 +386,26 @@ COMMITMSG
             "$(basename "$log_file")" "$status_file"
           break
         fi
+        # The agent wrapper writes this once the agent process exits, whether or not it
+        # ever got far enough to produce a results/*.json above. Without this, an agent
+        # that dies immediately (no API key configured, auth expired, bad prompt) leaves
+        # the CI panel stuck showing "building" forever with no indication anything
+        # went wrong. A sidecar file, not a line in the log itself — the log is shown
+        # verbatim to the user in the CI panel, and a raw "LANI_AGENT_EXIT:1" marker in
+        # the middle of their agent's output would just be confusing.
+        exit_file="${log_file}.exit"
+        if [ -f "$exit_file" ]; then
+          exit_code="$(cat "$exit_file" 2>/dev/null || echo 1)"
+          if [ "$exit_code" != "0" ]; then
+            detail="agent exited before finishing (code ${exit_code}) — see log"
+            if grep -qiE 'no api key|not authenticated|unauthorized|/login|invalid api key|missing credentials' "$log_file" 2>/dev/null; then
+              detail="agent has no API key/credentials configured — sign in or set one for the selected coding agent"
+            fi
+            _hl_write_status "$name" "$ts_iso" fail fail "$detail" \
+              "$(basename "$log_file")" "$status_file"
+          fi
+          break
+        fi
       done
     ) &
     disown
@@ -430,10 +450,14 @@ PROMPT_EOF
   if $have_ci; then
     cat > "$agent_script" <<AGENT_EOF
 #!/usr/bin/env bash
-set -euo pipefail
+# No -e here: an agent that dies immediately (missing API key, bad prompt, etc.) must
+# still fall through to the exit-code sidecar below, or the background monitor in
+# cmd_modules_use never learns the run is over and the CI panel stays "building" forever.
+set -uo pipefail
 cd $(printf '%q' "$worktree_path")
 $(printf '%q' "$AGENT_BIN") $AGENT_ARGS "\$(< $(printf '%q' "$prompt_file"))" 2>&1 \
   | tee $(printf '%q' "$log_file")
+printf '%s' "\${PIPESTATUS[0]}" > $(printf '%q' "$log_file").exit
 echo
 printf '\n  ══════ lani:${name} agent done ══════\n\n'
 read -r _unused

@@ -520,7 +520,12 @@ let
     var boot = true;
     var activeTab = "sess";
     var currentMod = null;
+    var currentModStatus = null;
     var ciTimer = null;
+    // Set by installMod() and read by refreshCi(): a just-triggered install has no
+    // status file yet (the agent hasn't been spawned), so the first poll or two would
+    // otherwise render the same "No CI run yet" dead-end a never-installed module gets.
+    var installPendingUntil = 0;
 
     function base(){ return location.protocol + "//" + location.host + "/t"; }
     function cb(){ return "&_cb=" + Date.now(); }
@@ -737,6 +742,8 @@ let
 
     function selectMod(m){
       currentMod = m.name;
+      currentModStatus = m.status;
+      installPendingUntil = 0;
       document.querySelectorAll(".mrow").forEach(function(r){ r.classList.toggle("active", r.dataset.name === m.name); });
       showCiPanel(m);
     }
@@ -762,12 +769,32 @@ let
       fetch("/api/modules/status?name=" + encodeURIComponent(name))
         .then(function(r){ return r.ok ? r.json() : null; })
         .then(function(st){
+          document.getElementById("ci-result").style.display = "none";
           if(!st){
+            if(name === currentMod && Date.now() < installPendingUntil){
+              // A loading state, not a dead end: the install was just triggered and
+              // hasn't written a status file yet. Previously this briefly rendered
+              // "No CI run yet" (a race between this fetch and installMod's synchronous
+              // "Starting installation…" text) before the real status ever landed.
+              document.getElementById("ci-phases").innerHTML =
+                '<div class="ci-ph"><div class="ci-lbl">Starting</div>' +
+                '<div class="ci-st running"><span class="ci-spin"></span> running</div></div>';
+              document.getElementById("ci-log").textContent =
+                "Starting installation… this can take a few minutes.";
+              return;
+            }
             document.getElementById("ci-phases").innerHTML = "";
-            document.getElementById("ci-result").style.display = "none";
-            document.getElementById("ci-log").textContent = "No CI run yet. Click Install to begin.";
+            // "Click Install to begin" is only true for a module that still HAS an
+            // Install button (status "available"). An "installed" or "in-progress"
+            // module with no status file (e.g. after a reboot, or an old demo module
+            // baked into the image) has no such button anywhere in the UI — telling the
+            // user to click one that doesn't exist is a dead end.
+            document.getElementById("ci-log").textContent = currentModStatus === "available"
+              ? "No CI run yet. Click Install to begin."
+              : "No CI run yet for this session.";
             return;
           }
+          installPendingUntil = 0;
           if(st.phases){
             document.getElementById("ci-phases").innerHTML = st.phases.map(function(p, i){
               var icon = p.status === "done"    ? "✓"
@@ -785,7 +812,10 @@ let
             rb.textContent = st.result === "pass"
               ? "✓  " + name + " passed all health checks"
               : "✗  Failed — " + (st.detail || "see log");
-            rb.style.display = "";
+            // #ci-result's base CSS rule is `display: none` (so it starts hidden); an
+            // empty inline style here doesn't beat that stylesheet rule, so this banner
+            // — including the "no API key configured" warning — never actually appeared.
+            rb.style.display = "block";
           }
           if(st.log){
             fetch("/api/modules/log?name=" + encodeURIComponent(name))
@@ -808,14 +838,27 @@ let
 
     function installMod(m){
       currentMod = m.name;
+      currentModStatus = m.status;
+      // No status file exists yet — give refreshCi() a window to render a loading state
+      // instead of the "No CI run yet" dead-end message. showCiPanel() below calls
+      // refreshCi() immediately, so this has to be set *before* that call.
+      installPendingUntil = Date.now() + 8000;
       document.querySelectorAll(".mrow").forEach(function(r){ r.classList.toggle("active", r.dataset.name === m.name); });
       showCiPanel(m);
-      document.getElementById("ci-log").textContent = "Starting installation…";
-      // Trigger install via hidden iframe (creates a zellij session through ttyd)
+      // Trigger install via a hidden iframe (creates a zellij session through ttyd).
+      // A 0x0 iframe used to be enough since it's never shown — but ttyd sizes the pty
+      // from the iframe's rendered dimensions via xterm.js's fit(), and zellij then
+      // keeps the session's pane locked to whichever attached client is smallest. That
+      // pinned every installed module's session to an unusably tiny terminal, even
+      // after this client disconnected — zellij only re-fits for clients attached AT
+      // the time. Give it real (if offscreen) pixel dimensions, and detach it once the
+      // session is up so the next real attach (the session's own tab) is the only
+      // client and gets sized normally.
       var hf = document.createElement("iframe");
-      hf.style.cssText = "display:none;position:absolute;width:0;height:0";
+      hf.style.cssText = "position:fixed;left:-10000px;top:0;width:1000px;height:700px;border:0";
       hf.src = base() + "/?arg=install&arg=" + encodeURIComponent(m.name) + cb();
       document.body.appendChild(hf);
+      setTimeout(function(){ hf.remove(); }, 5000);
       setTimeout(refresh, 2500);
       setTimeout(refreshModules, 3500);
     }
