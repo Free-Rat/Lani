@@ -129,6 +129,12 @@ let
                   echo '#!${pkgs.bash}/bin/bash'
                   # shellcheck disable=SC2016
                   printf 'export PATH=%s:$PATH\n' "${sysPath}"
+                  # This pane's command runs from web-terminal.service, which — like any
+                  # systemd service — does not inherit environment.variables (only login
+                  # shells source /etc/set-environment). Over SSH LANI_CATALOG is already
+                  # in the environment; here it has to be passed explicitly or `lani`
+                  # dies with "LANI_CATALOG is not set".
+                  printf 'export LANI_CATALOG=%s\n' "${config.programs.lani.webTerminal.catalogPath}"
                   printf 'lani modules use %s\n' "$module"
                   echo 'echo; read -rp "Installation complete. Press Enter. "'
                 } > "$launcher"

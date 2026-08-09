@@ -32,6 +32,13 @@
 let
   cfg = config.programs.lani.webTerminal;
 
+  # Only the agents actually wired into web-term-launch's dispatch (agent-menu.nix
+  # filters agentSpecs by programs.lani.menu.agents the same way). Offering one that
+  # isn't in that list just gets you "unknown agent: <name>" from the launcher.
+  agentOptions = lib.concatMapStrings (
+    a: ''<option value="${a}">${a}</option>''
+  ) config.programs.lani.menu.agents;
+
   # nixpkgs' libwebsockets builds its event-loop backends (libuv/libev/libevent)
   # as separate dlopen-ed plugins (LWS_WITH_EVLIB_PLUGINS, on by default once libuv
   # is present). At runtime lws fails to locate the libuv plugin and aborts with
@@ -465,10 +472,7 @@ let
             </div>
             <div class="field sel">
               <select id="ag">
-                <option value="claude">claude</option>
-                <option value="pi">pi</option>
-                <option value="opencode">opencode</option>
-                <option value="shell">shell</option>
+                ${agentOptions}
               </select>
             </div>
             <button id="go">＋ Create session</button>
@@ -569,7 +573,7 @@ let
     function render(items){
       lastList = items;
       var el = document.getElementById("list");
-      el.querySelectorAll(".sk").forEach(function(s){ s.remove(); });
+      el.querySelectorAll(".sk, .empty").forEach(function(s){ s.remove(); });
       var cntEl = document.getElementById("cnt");
       cntEl.textContent = items.length;
 
