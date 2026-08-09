@@ -401,12 +401,14 @@ let
       .mdot.available   { background: var(--surf2); }
       .mdot.installed   { background: var(--green); box-shadow: 0 0 5px var(--green); }
       .mdot.in-progress { background: var(--blue); animation: pulse-dot 1.4s ease-in-out infinite; }
+      .mdot.failed      { background: var(--red); box-shadow: 0 0 5px var(--red); }
       .mnm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 500; color: var(--sub); transition: color .15s; }
       .mrow:hover .mnm, .mrow.active .mnm { color: var(--text); }
       .mbadge { font-size: 9px; font-weight: 700; letter-spacing: .3px; text-transform: uppercase; flex-shrink: 0; padding: 1px 5px; border-radius: 3px; }
       .mbadge.available   { color: var(--muted); }
       .mbadge.installed   { color: var(--green); }
       .mbadge.in-progress { color: var(--blue); }
+      .mbadge.failed      { color: var(--red); }
       .ibtn {
         font-size: 9px; font-weight: 700; flex-shrink: 0; padding: 2px 7px; border-radius: 4px;
         background: none; border: 1px solid var(--surf2); color: var(--muted); cursor: pointer;
@@ -914,18 +916,25 @@ let
             if len(parts) < 4:
                 continue
             name, sub, port, desc = parts
+            ci = get_ci_status(name)
             mods.append({"name": name, "subdomain": sub, "port": port,
                           "description": desc,
-                          "status": module_status(name),
-                          "ci": get_ci_status(name)})
+                          "status": module_status(name, ci),
+                          "ci": ci})
         return mods
 
-    def module_status(name):
+    def module_status(name, ci):
         try:
             r = subprocess.run(
                 ["git", "-C", SERVICES_REPO, "worktree", "list", "--porcelain"],
                 capture_output=True, text=True, timeout=5)
             if "refs/heads/feat/" + name in r.stdout:
+                # The worktree/branch outlives a failed CI run (nothing cleans it up),
+                # so this alone can't distinguish "still building" from "failed" — a
+                # module whose agent died (e.g. no API key configured) would otherwise
+                # show "building" forever instead of the failure the CI panel reports.
+                if ci and ci.get("result") == "fail":
+                    return "failed"
                 return "in-progress"
         except Exception:
             pass

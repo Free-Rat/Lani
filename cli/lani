@@ -169,6 +169,7 @@ CATALOG_REPO="${LANI_CATALOG:-}"
 SERVICES_REPO="${LANI_SERVICES:-/etc/nixos}"
 WORKTREES_DIR="${LANI_WORKTREES:-${SERVICES_REPO}/.lani-worktrees}"
 CATALOG_NIX="${CATALOG_REPO%/}/catalog.nix"
+CI_DIR="/var/lib/lani-ci"
 
 NIX=$(command -v nix || die "required command not found: nix")
 GIT=$(command -v git || die "required command not found: git")
@@ -223,6 +224,13 @@ module_status() {
   local name="$1"
   if "$GIT" -C "$SERVICES_REPO" worktree list --porcelain 2>/dev/null \
       | grep -q "^branch refs/heads/feat/${name}$"; then
+    # The worktree/branch outlives a failed CI run — nothing cleans it up — so this
+    # alone can't tell "still building" from "failed" (e.g. the agent had no API key
+    # configured and died immediately, well before ever touching request-test.sh).
+    if grep -q '"result": *"fail"' "${CI_DIR}/status/${name}.json" 2>/dev/null; then
+      echo "failed"
+      return
+    fi
     echo "in progress"
     return
   fi
@@ -239,6 +247,7 @@ _badge() {
   case "$1" in
     installed)     printf "${BGRN}● installed${R}";    BADGE_VIS=11 ;;
     "in progress") printf "${BYLW}◐ in progress${R}";  BADGE_VIS=13 ;;
+    failed)        printf "${BRED}✗ failed${R}";       BADGE_VIS=8  ;;
     available)     printf "${DIM}○ available${R}";     BADGE_VIS=11 ;;
     pass)          printf "${BGRN}✓ pass${R}";         BADGE_VIS=6  ;;
     fail)          printf "${BRED}✗ fail${R}";         BADGE_VIS=6  ;;
@@ -266,6 +275,7 @@ cmd_modules_list() {
     case "$status" in
       installed)     printf "  ${B}${BGRN}%-18s${R}" "$name" ;;
       "in progress") printf "  ${B}${BYLW}%-18s${R}" "$name" ;;
+      failed)        printf "  ${B}${BRED}%-18s${R}" "$name" ;;
       *)             printf "  ${B}${BWHT}%-18s${R}" "$name" ;;
     esac
 
