@@ -299,6 +299,74 @@ cmd_modules_list() {
   printf "\n  ${DIM}Run ${R}${B}lani modules use <name>${R}${DIM} to install.${R}\n\n"
 }
 
+# ── agent credential detection ───────────────────────────────────────────────────
+# Best-effort, not exhaustive: checks the auth file each agent's own /login writes,
+# plus a handful of the most common provider API key env vars — not the full provider
+# matrix these agents actually support. Good enough to pick a usable agent among
+# pi/claude/opencode and to warn the web sidebar before an install is even attempted;
+# not a guarantee an unusual setup will be detected.
+_AGENT_ENV_VARS="ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY XAI_API_KEY MISTRAL_API_KEY GROQ_API_KEY DEEPSEEK_API_KEY"
+
+_agent_env_configured() {
+  local v
+  for v in $_AGENT_ENV_VARS; do
+    [ -n "${!v:-}" ] && return 0
+  done
+  return 1
+}
+
+# Non-empty and not just "{}" (an initialized-but-empty auth file).
+_auth_file_configured() {
+  [ -s "$1" ] && [ "$(wc -c < "$1")" -gt 2 ]
+}
+
+_agent_has_creds() {
+  case "$1" in
+    pi)       _agent_env_configured || _auth_file_configured "$HOME/.pi/agent/auth.json" ;;
+    claude)   _agent_env_configured || _auth_file_configured "$HOME/.claude/.credentials.json" ;;
+    opencode) _agent_env_configured \
+                || _auth_file_configured "$HOME/.local/share/opencode/auth.json" \
+                || _auth_file_configured "$HOME/.config/opencode/auth.json" ;;
+    *)        return 1 ;;
+  esac
+}
+
+# Sets AGENT_BIN (must already be declared by the caller, local or otherwise) to
+# whichever of pi/claude/opencode is on PATH *and* has credentials configured, tried in
+# that priority order — not just the first one merely installed, or an agent with no
+# credentials would always be picked (and always fail) ahead of one that actually works.
+# Falls back to plain PATH order if none have detected credentials, so behavior is
+# unchanged (still attempts something, still surfaces that agent's own error) when
+# nothing can be detected. LANI_AGENT, if set, is an explicit override of all of this.
+resolve_agent() {
+  if [ -n "${LANI_AGENT:-}" ]; then
+    AGENT_BIN=$(command -v "$LANI_AGENT") || die "LANI_AGENT=$LANI_AGENT not found on PATH"
+    return
+  fi
+  local cand
+  for cand in pi claude opencode; do
+    if command -v "$cand" >/dev/null 2>&1 && _agent_has_creds "$cand"; then
+      AGENT_BIN=$(command -v "$cand")
+      return
+    fi
+  done
+  AGENT_BIN=$(command -v pi || command -v claude || command -v opencode || true)
+}
+
+cmd_agent_status() {
+  local AGENT_BIN
+  resolve_agent
+  if [ -z "$AGENT_BIN" ]; then
+    printf '{"agent":null,"configured":false}\n'
+    return
+  fi
+  local name configured
+  name=$(basename "$AGENT_BIN")
+  configured=false
+  _agent_has_creds "$name" && configured=true
+  printf '{"agent":"%s","configured":%s}\n' "$name" "$configured"
+}
+
 # ── modules use ─────────────────────────────────────────────────────────────────
 cmd_modules_use() {
   local name="${1:-}"
@@ -422,13 +490,11 @@ COMMITMSG
   fi
 
   # ── Build agent prompt + wrapper script ─────────────────────────────────────
-  # Whichever agent is installed; the default set is free software. Override with LANI_AGENT.
+  # Whichever installed agent actually has credentials configured, in priority order
+  # pi/claude/opencode (an agent with no credentials would otherwise always be picked —
+  # and always fail — ahead of one that works). Override with LANI_AGENT.
   local AGENT_BIN AGENT_ARGS
-  if [ -n "${LANI_AGENT:-}" ]; then
-    AGENT_BIN=$(command -v "$LANI_AGENT") || die "LANI_AGENT=$LANI_AGENT not found on PATH"
-  else
-    AGENT_BIN=$(command -v pi || command -v claude || command -v opencode || true)
-  fi
+  resolve_agent
   [ -n "$AGENT_BIN" ] || die "no coding agent found — install one, or set LANI_AGENT"
 
   case "$(basename "$AGENT_BIN")" in
@@ -594,12 +660,13 @@ usage() {
   printf "    ${BCYN}modules list${R}              List catalog modules and install status\n"
   printf "    ${BCYN}modules use${R} ${DIM}<name>${R}        Install a module and run CI tests\n"
   printf "    ${BCYN}modules status${R}            Show active worktrees and CI results\n"
+  printf "    ${BCYN}agent-status${R}              Print which agent 'modules use' would run, as JSON\n"
   printf "\n"
   printf "  ${B}Environment:${R}\n"
   printf "    ${DIM}LANI_CATALOG${R}    catalog checkout containing catalog.nix\n"
   printf "    ${DIM}LANI_SERVICES${R}   services repository agents edit  ${DIM}(%s)${R}\n" "$SERVICES_REPO"
   printf "    ${DIM}LANI_WORKTREES${R}  where feature worktrees are created\n"
-  printf "    ${DIM}LANI_AGENT${R}      coding agent to drive  ${DIM}(default: first of pi, claude, opencode)${R}\n"
+  printf "    ${DIM}LANI_AGENT${R}      coding agent to drive  ${DIM}(default: first of pi, claude, opencode with credentials)${R}\n"
   printf "\n"
   sep
   printf "\n"
@@ -616,6 +683,7 @@ case "${1:-}" in
       *)      usage ;;
     esac
     ;;
+  agent-status) cmd_agent_status ;;
   -h | --help | help) usage 0 ;;
   *) usage ;;
 esac
