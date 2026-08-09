@@ -486,6 +486,7 @@ let
             Modules
             <span class="count" id="mod-cnt">—</span>
           </div>
+          <div id="agent-warn" style="display:none;margin:0 8px 8px;padding:8px 10px;border-radius:8px;background:rgba(237,135,150,.08);border:1px solid rgba(237,135,150,.35);color:var(--red);font-size:11px;line-height:1.5"></div>
           <div id="mod-list">
             <div class="sk" style="width:88%"></div>
             <div class="sk" style="width:72%;opacity:.6"></div>
@@ -694,7 +695,7 @@ let
       document.getElementById("tab-mods").classList.toggle("active", t === "mods");
       document.getElementById("sess-view").style.display = t === "sess" ? "flex" : "none";
       document.getElementById("mods-view").style.display = t === "mods" ? "flex" : "none";
-      if(t === "mods") refreshModules();
+      if(t === "mods"){ refreshModules(); refreshAgentStatus(); }
     }
 
     function refreshModules(){
@@ -702,6 +703,24 @@ let
         .then(function(r){ return r.json(); })
         .then(renderModules)
         .catch(function(){});
+    }
+
+    // Surface a missing API key *before* Install is clicked, not after a run dies and
+    // the CI panel is the only place that says why.
+    function refreshAgentStatus(){
+      fetch("/api/agent-status")
+        .then(function(r){ return r.json(); })
+        .then(function(st){
+          var el = document.getElementById("agent-warn");
+          if(st && st.configured === false){
+            el.textContent = "⚠ No credentials configured for the \"" + (st.agent || "coding") +
+              "\" agent — installs will fail until you sign in (e.g. run /login in a shell " +
+              "session) or set an API key.";
+            el.style.display = "block";
+          } else {
+            el.style.display = "none";
+          }
+        }).catch(function(){});
     }
 
     function renderModules(mods){
@@ -869,7 +888,7 @@ let
     document.getElementById("nm").addEventListener("keydown", function(e){ if(e.key === "Enter"){ create(); } });
     refresh();
     setInterval(refresh, 2500);
-    setInterval(function(){ if(activeTab === "mods") refreshModules(); }, 5000);
+    setInterval(function(){ if(activeTab === "mods") { refreshModules(); refreshAgentStatus(); } }, 5000);
     </script>
     </body>
     </html>
@@ -878,7 +897,7 @@ let
   # Sidebar backend: serve index.html (with the ttyd port injected) and a JSON list of
   # sessions. Reads the same agent markers the gum/web launchers write, so badges match.
   sidebarServer = pkgs.writeText "lani-webui.py" ''
-    import json, os, re, subprocess, time
+    import json, os, re, shutil, subprocess, time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse, parse_qs
 
@@ -969,6 +988,43 @@ let
             pass
         return None
 
+    # Best-effort: is *some* credential available for the agent `lani modules use` would
+    # actually run? Mirrors cli/lani's own resolution order (LANI_AGENT, else first of
+    # pi/claude/opencode on PATH). The auth-file check is the reliable half of this — it's
+    # a plain file under the user's home, so unlike environment variables it reads the same
+    # regardless of which process context looks at it (this systemd service, a login shell,
+    # a zellij pane). The env-var list is best-effort on top: only a handful of the most
+    # common providers, not the full provider matrix, and may miss unusual setups.
+    _AGENT_ENV_VARS = [
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY",
+        "XAI_API_KEY", "MISTRAL_API_KEY", "GROQ_API_KEY", "DEEPSEEK_API_KEY",
+    ]
+    _AGENT_AUTH_FILES = {
+        "pi":       [".pi/agent/auth.json"],
+        "claude":   [".claude/.credentials.json"],
+        "opencode": [".local/share/opencode/auth.json", ".config/opencode/auth.json"],
+    }
+
+    def agent_status():
+        agent = os.environ.get("LANI_AGENT") or next(
+            (a for a in ("pi", "claude", "opencode") if shutil.which(a)), None)
+        if not agent:
+            return {"agent": None, "configured": False}
+        if any(os.environ.get(v) for v in _AGENT_ENV_VARS):
+            return {"agent": agent, "configured": True}
+        home = os.path.expanduser("~")
+        for rel in _AGENT_AUTH_FILES.get(agent, []):
+            p = os.path.join(home, rel)
+            try:
+                if os.path.getsize(p) <= 2:  # "{}" or empty — no entries
+                    continue
+                with open(p) as f:
+                    if json.load(f):
+                        return {"agent": agent, "configured": True}
+            except Exception:
+                continue
+        return {"agent": agent, "configured": False}
+
     def sessions():
         try:
             out = subprocess.run(["zellij", "list-sessions", "-s"],
@@ -1025,6 +1081,8 @@ let
                     self._send(404, b"not found", "text/plain")
             elif self.path.startswith("/api/sessions"):
                 self._send(200, json.dumps(sessions()).encode(), "application/json")
+            elif self.path.startswith("/api/agent-status"):
+                self._send(200, json.dumps(agent_status()).encode(), "application/json")
             elif self.path.startswith("/api/rename-session"):
                 qs = parse_qs(urlparse(self.path).query)
                 names = qs.get("name", [])
@@ -1217,10 +1275,16 @@ in
             SERVICES_REPO = cfg.servicesRepo;
             CI_DIR = cfg.ciDir;
           };
+          # agent_status() shells out to `shutil.which("pi"/"claude"/"opencode")` to find
+          # whichever coding agent is actually installed. Those only land in
+          # /run/current-system/sw/bin (environment.systemPackages) — naming every possible
+          # agent package here would duplicate cfg.shell.agents (config-dependent), so this
+          # points at the profile directory they're all symlinked into instead.
           path = [
             pkgs.zellij
             pkgs.nix
             pkgs.git
+            "/run/current-system/sw"
           ];
           serviceConfig.ExecStart = "${pkgs.python3}/bin/python3 ${sidebarServer}";
         };
