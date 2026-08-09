@@ -627,12 +627,26 @@ let
             function save(){
               if(done) return; done = true;
               var v = inp.value.trim();
+              // Swap back to a plain .nm now, not on the next poll — Enter doesn't
+              // blur the input, so document.activeElement stays == inp forever and a
+              // poll-driven check for "not focused" would never fire.
+              n = document.createElement("div");
+              n.className = "nm";
+              n.textContent = v || sname;
+              if(inp.parentNode) inp.parentNode.replaceChild(n, inp);
               fetch("/api/rename-session?name=" + encodeURIComponent(sname) + "&label=" + encodeURIComponent(v))
                 .then(function(){ setTimeout(refresh, 200); }).catch(function(){ refresh(); });
             }
             inp.addEventListener("keydown", function(ev){
               if(ev.key === "Enter"){ save(); }
-              else if(ev.key === "Escape"){ done = true; refresh(); }
+              else if(ev.key === "Escape"){
+                done = true;
+                n = document.createElement("div");
+                n.className = "nm";
+                n.textContent = slabel;
+                if(inp.parentNode) inp.parentNode.replaceChild(n, inp);
+                refresh();
+              }
             });
             inp.addEventListener("blur", save);
           };
