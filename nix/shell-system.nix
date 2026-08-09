@@ -40,6 +40,16 @@ in
 
     networking.hostName = lib.mkDefault "lani-shell";
 
+    # /etc/nixos is bind-mounted in from the host (nix/modules/shell-container.nix
+    # already forces it group-writable there), but this container's own stage-2 boot
+    # runs its "setting up /etc..." activation step *before* systemd — and with it,
+    # before this container's own tmpfiles-setup.service — which resets the bind
+    # mount's mode back to 0755 as a side effect. Redo it here, after that happens,
+    # so `lani modules use` can actually create .lani-worktrees as cfg.user.
+    systemd.tmpfiles.rules = [
+      "z /etc/nixos 0775 root users - -"
+    ];
+
     nixpkgs.config.allowUnfreePredicate =
       pkg: cfg.shell.enableClaudeCode && lib.getName pkg == "claude-code";
 
