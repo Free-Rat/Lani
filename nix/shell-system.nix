@@ -48,6 +48,14 @@ in
     # so `lani modules use` can actually create .lani-worktrees as cfg.user.
     systemd.tmpfiles.rules = [
       "z /etc/nixos 0775 root users - -"
+
+      # zsh runs its own first-boot wizard (zsh-newuser-install) on any interactive
+      # login for an account with none of .zshenv/.zprofile/.zshrc/.zlogin — which
+      # cfg.user never has on a fresh home. It doesn't just prompt over SSH: the
+      # "shell" agent launches `zsh -l` directly (agent-menu.nix), so every brand-new
+      # "shell" session hits it too. An empty .zshrc is exactly what option (0) in
+      # that wizard itself creates to skip it for good — just doing it up front.
+      "f /home/${cfg.user}/.zshrc 0644 ${cfg.user} users - -"
     ];
 
     # /etc/nixos is root-owned (its group is opened up above, but git cares about the
